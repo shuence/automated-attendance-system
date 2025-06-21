@@ -18,7 +18,7 @@ try:
 except ImportError as e:
     logger.error(f"Error importing DeepFace: {str(e)}")
     
-def verify_faces(classroom_image_path, students, threshold=0.6, model_name="VGG-Face", return_confidence=False):
+def verify_faces(classroom_image_path, students, threshold=0.6, model_name="Facenet512", return_confidence=False):
     """
     Verify faces in a classroom image against registered student faces
     
@@ -150,7 +150,7 @@ def verify_faces(classroom_image_path, students, threshold=0.6, model_name="VGG-
         return present_students, confidence_scores
     return present_students
 
-def extract_embedding(image_path, model_name="VGG-Face"):
+def extract_embedding(image_path, model_name="Facenet512"):
     """Extract facial embedding from an image"""
     try:
         embedding_objs = DeepFace.represent(
