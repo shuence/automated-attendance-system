@@ -418,8 +418,37 @@ if page == "Teacher Dashboard":
                                     
                                     if enrolled_subjects:
                                         st.markdown("**Enrolled Subjects:**")
+                                        
+                                        # Display subjects as badges in a more modern way
+                                        subject_badges = []
                                         for subject in enrolled_subjects:
-                                            st.markdown(f"- {subject[0]}: {subject[1]}")
+                                            subject_code = subject[0]
+                                            subject_name = subject[1]
+                                            short_name = subject_short_names.get(subject_name, subject_code)
+                                            subject_badges.append(f"<span style='display:inline-block; margin:2px; padding:4px 8px; background-color:#1E3A8A; color:white; border-radius:12px; font-size:0.8em;'>{short_name}</span>")
+                                        
+                                        st.markdown(f"<div>{''.join(subject_badges)}</div>", unsafe_allow_html=True)
+                                        st.caption(f"Total subjects: {len(enrolled_subjects)}")
+                                        
+                                        # Add a section to show subject-wise attendance if available
+                                        try:
+                                            attendance_summary = get_student_attendance_summary(student_id)
+                                            if attendance_summary:
+                                                st.markdown("**Attendance Overview:**")
+                                                
+                                                # Calculate overall attendance
+                                                total_present = sum(row["present_count"] for row in attendance_summary)
+                                                total_classes = sum(row["total_classes"] for row in attendance_summary)
+                                                overall_percentage = round(total_present / total_classes * 100, 1) if total_classes > 0 else 0
+                                                
+                                                # Display overall attendance with appropriate color
+                                                color = "#4caf50" if overall_percentage >= 75 else "#ff9800" if overall_percentage >= 50 else "#f44336"
+                                                st.markdown(f"<div style='font-weight:bold'>Overall Attendance: <span style='color:{color}'>{overall_percentage}%</span></div>", unsafe_allow_html=True)
+                                                
+                                        except Exception as att_e:
+                                            logger.error(f"Error retrieving attendance summary: {str(att_e)}")
+                                            # Just skip attendance display if there's an error
+                                            pass
                                     else:
                                         st.warning("Student is not enrolled in any subjects.")
                                 except Exception as e:
@@ -519,6 +548,14 @@ elif page == "Take Attendance":
     st.title("📝 Take Attendance")
     st.markdown('<div class="dashboard-card"><p>Capture attendance using facial recognition.</p></div>', unsafe_allow_html=True)
     st.subheader(f"Department: {department} | Year: {year} | Division: {division}")
+    
+    # Check if we need to show success message from previous submission
+    if hasattr(st.session_state, 'last_attendance') and st.session_state.get('clear_attendance_form', False):
+        last = st.session_state.last_attendance
+        st.success(f"✅ Successfully saved attendance for {last['count']} students in {last['subject']} on {last['date']} ({last['period']}).")
+        
+        # Clear the flag so the message doesn't show again on manual refresh
+        st.session_state.clear_attendance_form = False
     
     # Create columns for form inputs
     col1, col2 = st.columns(2)
@@ -650,6 +687,7 @@ elif page == "Take Attendance":
                         image = Image.open(image_path)
                         st.image(image, caption="Captured Image", width=400)
                         image_file = image_path
+                        image_files = [image_path]  # Add to image_files list for consistency
                     else:
                         st.error(f"Failed to capture image from ESP32-CAM. Status code: {response.status_code}")
             except requests.RequestException as e:
@@ -660,7 +698,7 @@ elif page == "Take Attendance":
                 st.error(f"Error: {str(e)}")
     
     # Process attendance button - just analyze, don't save yet
-    if deepface_available and st.button("Analyze Image") and image_file is not None and subject_id is not None:
+    if deepface_available and st.button("Analyze Image") and len(image_files) > 0 and subject_id is not None:
         with st.spinner("Processing image using facial recognition..."):
             try:
                 # Record start time for performance metrics
