@@ -248,22 +248,22 @@ def get_class_attendance_report(date):
     cursor.execute('''
     SELECT 
         s.id, 
-        s.roll_no, 
+        s.roll_no,
         s.name,
-        subj.code as subject_code,
-        subj.name as subject_name,
-        COALESCE(a.status, 'absent') as status,
-        a.period
+        s.email,
+        sub.code as subject_code,
+        sub.name as subject_name,
+        COALESCE(a.status, 'absent') as status
     FROM 
         students s
     JOIN 
         student_subjects ss ON s.id = ss.student_id
-    JOIN 
-        subjects subj ON ss.subject_id = subj.id
+    JOIN
+        subjects sub ON ss.subject_id = sub.id
     LEFT JOIN 
-        attendance a ON s.id = a.student_id AND a.date = ? AND a.subject_id = subj.id
+        attendance a ON s.id = a.student_id AND a.date = ? AND a.subject_id = sub.id
     ORDER BY 
-        s.roll_no, subj.code
+        s.roll_no, sub.name
     ''', (date,))
     
     results = cursor.fetchall()
@@ -272,99 +272,102 @@ def get_class_attendance_report(date):
     return results
 
 def get_student_attendance_report(student_id):
-    """Get attendance report for a specific student across all subjects"""
+    """Get detailed attendance report for a specific student"""
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
     SELECT 
-        a.date, 
-        s.code as subject_code, 
-        s.name as subject_name, 
-        a.period, 
+        a.date,
+        sub.code as subject_code,
+        sub.name as subject_name,
+        a.period,
         a.status
     FROM 
         attendance a
-    JOIN 
-        subjects s ON a.subject_id = s.id
+    JOIN
+        subjects sub ON a.subject_id = sub.id
     WHERE 
         a.student_id = ?
     ORDER BY 
         a.date DESC, a.period
     ''', (student_id,))
     
-    results = cursor.fetchall()
+    results = [dict(row) for row in cursor.fetchall()]
     conn.close()
     
     return results
 
 def get_student_attendance_summary(student_id):
-    """Get summary of attendance for a specific student grouped by subject"""
+    """Get summary of attendance for a student across all subjects"""
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
     SELECT 
-        s.id as subject_id,
-        s.code as subject_code, 
-        s.name as subject_name, 
+        sub.id as subject_id,
+        sub.code as subject_code,
+        sub.name as subject_name,
         COUNT(CASE WHEN a.status = 'present' THEN 1 END) as present_count,
-        COUNT(DISTINCT a.date || a.period) as total_classes
+        COUNT(a.id) as total_classes
     FROM 
-        subjects s
-    JOIN 
-        student_subjects ss ON s.id = ss.subject_id
+        subjects sub
+    JOIN
+        student_subjects ss ON sub.id = ss.subject_id
     LEFT JOIN 
-        attendance a ON s.id = a.subject_id AND a.student_id = ss.student_id
+        attendance a ON sub.id = a.subject_id AND a.student_id = ?
     WHERE 
         ss.student_id = ?
     GROUP BY 
-        s.id
+        sub.id
     ORDER BY 
-        s.code
-    ''', (student_id,))
+        sub.name
+    ''', (student_id, student_id))
     
-    results = cursor.fetchall()
+    results = [dict(row) for row in cursor.fetchall()]
     conn.close()
     
     return results
 
 def get_student_details(student_id):
-    """Get details for a specific student"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT id, roll_no, name, email, department, year, division, image_path
-    FROM students
-    WHERE id = ?
-    ''', (student_id,))
-    
-    result = cursor.fetchone()
-    conn.close()
-    
-    if result:
-        return {
-            "id": result["id"],
-            "roll_no": result["roll_no"],
-            "name": result["name"],
-            "email": result["email"],
-            "department": result["department"],
-            "year": result["year"],
-            "division": result["division"],
-            "image_path": result["image_path"]
-        }
-    else:
-        return None
-
-def get_class_attendance_summary(date_from, date_to):
-    """Get summary of attendance for all students within a date range"""
+    """Get detailed information about a student"""
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
     SELECT 
-        s.id as student_id,
+        id, 
+        roll_no, 
+        name, 
+        email, 
+        department, 
+        year, 
+        division, 
+        image_path
+    FROM 
+        students
+    WHERE 
+        id = ?
+    ''', (student_id,))
+    
+    row = cursor.fetchone()
+    if row:
+        student = dict(row)
+    else:
+        student = None
+    
+    conn.close()
+    
+    return student
+
+def get_class_attendance_summary(date_from, date_to):
+    """Get attendance summary for all students in the class within a date range"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT 
+        s.id,
         s.roll_no,
         s.name,
         s.division,
@@ -373,14 +376,14 @@ def get_class_attendance_summary(date_from, date_to):
     FROM 
         students s
     LEFT JOIN 
-        attendance a ON s.id = a.student_id AND a.date >= ? AND a.date <= ?
+        attendance a ON s.id = a.student_id AND a.date BETWEEN ? AND ?
     GROUP BY 
         s.id
     ORDER BY 
         s.roll_no
     ''', (date_from, date_to))
     
-    results = cursor.fetchall()
+    results = [dict(row) for row in cursor.fetchall()]
     conn.close()
     
     return results 

@@ -2,6 +2,11 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+import calendar
+
+from utils.db_utils import get_students_by_subject
 
 # Page configuration must be the first Streamlit command
 st.set_page_config(
@@ -556,6 +561,19 @@ elif page == "Take Attendance":
         
         # Clear the flag so the message doesn't show again on manual refresh
         st.session_state.clear_attendance_form = False
+        
+        # Reset form fields
+        if 'form_key' in st.session_state:
+            del st.session_state['form_key']
+        
+        # Clear uploaded files
+        if 'uploaded_files' in st.session_state:
+            del st.session_state['uploaded_files']
+        
+        # Add a button to take new attendance
+        if st.button("Take Another Attendance", key="take_another"):
+            # This will be handled in the next rerun - just clear the session state
+            pass
     
     # Create columns for form inputs
     col1, col2 = st.columns(2)
@@ -633,7 +651,7 @@ elif page == "Take Attendance":
         
         if allow_multiple:
             # Multiple image upload
-            uploaded_files = st.file_uploader("Upload classroom images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+            uploaded_files = st.file_uploader("Upload classroom images", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="multi_image_uploader")
             
             if uploaded_files:
                 image_files = uploaded_files
@@ -658,10 +676,15 @@ elif page == "Take Attendance":
                     image_file = uploaded_files[selected_image_index]
                 else:
                     image_file = uploaded_files[0]
+                    
+                # Add button to process all images
+                process_all = st.checkbox("Process all images", value=False,
+                                         help="Enable to analyze all uploaded images in sequence")
         else:
             # Single image upload (original behavior)
-            image_file = st.file_uploader("Upload classroom image", type=["jpg", "jpeg", "png"])
+            image_file = st.file_uploader("Upload classroom image", type=["jpg", "jpeg", "png"], key="single_image_uploader")
             image_files = [image_file] if image_file is not None else []
+            process_all = False
             
             if image_file is not None:
                 try:
@@ -699,160 +722,360 @@ elif page == "Take Attendance":
     
     # Process attendance button - just analyze, don't save yet
     if deepface_available and st.button("Analyze Image") and len(image_files) > 0 and subject_id is not None:
-        with st.spinner("Processing image using facial recognition..."):
-            try:
-                # Record start time for performance metrics
-                start_time = time.time()
+        # If processing all images is enabled and there are multiple images
+        if process_all and len(image_files) > 1:
+            st.subheader("Processing Multiple Images")
+            
+            # Create a container for all results
+            all_results_container = st.container()
+            
+            # Initialize combined results
+            all_detected_faces = 0
+            all_recognized_students = set()  # Use a set to avoid duplicates
+            all_confidence_scores = []
+            total_processing_time = 0
+            
+            # Process each image
+            for idx, img_file in enumerate(image_files):
+                with st.spinner(f"Processing image {idx+1} of {len(image_files)}..."):
+                    try:
+                        # Record start time for performance metrics
+                        start_time = time.time()
+                        
+                        # Prepare parameters for DeepFace verification
+                        temp_image_path = None
+                        
+                        if is_uploaded_file(img_file):
+                            # For uploaded files, save to a temporary file
+                            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                            temp_image_path = f"temp_image_{idx}_{timestamp}.jpg"
+                            with open(temp_image_path, "wb") as f:
+                                f.write(img_file.getvalue())
+                            classroom_image = temp_image_path
+                        else:
+                            # For paths from ESP32-CAM
+                            classroom_image = img_file
+                        
+                        # Detect all faces first to get count
+                        detected_faces, face_locations = detect_faces_with_details(classroom_image)
+                        
+                        # Use the selected model with adjusted threshold for better recognition
+                        present_students, confidence_scores = verify_faces(
+                            classroom_image_path=classroom_image, 
+                            students=get_all_students(),
+                            threshold=threshold,
+                            model_name=model_name,
+                            return_confidence=True
+                        )
+                        
+                        # Calculate processing time
+                        end_time = time.time()
+                        processing_time = end_time - start_time
+                        
+                        # Update combined results
+                        all_detected_faces += len(detected_faces)
+                        all_recognized_students.update([student["id"] for student in present_students])
+                        all_confidence_scores.extend(confidence_scores)
+                        total_processing_time += processing_time
+                        
+                        # Display individual image results
+                        st.write(f"### Image {idx+1} Results")
+                        st.write(f"Detected faces: {len(detected_faces)}")
+                        st.write(f"Recognized students: {len(present_students)}")
+                        st.write(f"Processing time: {processing_time:.2f} seconds")
+                        
+                        # Clean up temporary file if created
+                        if temp_image_path and os.path.exists(temp_image_path):
+                            os.remove(temp_image_path)
+                            
+                    except Exception as e:
+                        logger.error(f"Error processing image {idx+1}: {str(e)}\n{traceback.format_exc()}")
+                        st.error(f"Error processing image {idx+1}: {str(e)}")
+            
+            # Display combined results
+            with all_results_container:
+                st.subheader("Combined Results")
                 
-                # Get all students enrolled in the selected subject
-                all_students = get_all_students()
+                # Display metrics
+                cols = st.columns(4)
+                with cols[0]:
+                    st.metric("Total Processing Time", f"{total_processing_time:.2f} sec")
+                with cols[1]:
+                    st.metric("Total Faces Detected", f"{all_detected_faces}")
+                with cols[2]:
+                    st.metric("Total Students Recognized", f"{len(all_recognized_students)}")
+                with cols[3]:
+                    recognition_rate = (len(all_recognized_students) / all_detected_faces * 100) if all_detected_faces > 0 else 0
+                    st.metric("Overall Recognition Rate", f"{recognition_rate:.1f}%")
                 
-                # Check if we have students in database
-                if not all_students:
-                    st.warning("No students found in database. Please register students first.")
-                else:
-                    # Prepare parameters for DeepFace verification
-                    # Handle both uploaded file objects and file paths
-                    temp_image_path = None
-                    
-                    if is_uploaded_file(image_file):
-                        # For uploaded files, save to a temporary file
-                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                        temp_image_path = f"temp_image_{timestamp}.jpg"
-                        with open(temp_image_path, "wb") as f:
-                            f.write(image_file.getvalue())
-                        classroom_image = temp_image_path
-                    else:
-                        # For paths from ESP32-CAM
-                        classroom_image = image_file
-                    
-                    # Detect all faces first to get count
-                    detected_faces, face_locations = detect_faces_with_details(classroom_image)
-                    
-                    # Use the selected model with adjusted threshold for better recognition
-                    present_students, confidence_scores = verify_faces(
-                        classroom_image_path=classroom_image, 
-                        students=all_students,
-                        threshold=threshold,
-                        model_name=model_name,
-                        return_confidence=True
-                    )
-                    
-                    # Calculate processing time
-                    end_time = time.time()
-                    processing_time = end_time - start_time
-                    
-                    # Display statistics
-                    display_recognition_stats(
-                        processing_time=processing_time,
-                        detected_faces=len(detected_faces),
-                        recognized_students=present_students,
-                        confidence_scores=confidence_scores,
-                        model_name=model_name
-                    )
-                    
-                    # Display attendance summary
-                    st.subheader("Attendance Summary")
-                    
-                    # Show comparison of detected vs recognized faces
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.info(f"**Detected Faces:** {len(detected_faces)}")
-                        
-                    with col2:
-                        st.success(f"**Recognized Students:** {len(present_students)}")
-                    
-                    if len(detected_faces) > len(present_students):
-                        st.warning(f"⚠️ {len(detected_faces) - len(present_students)} faces detected but not recognized. These may be students not registered in the system or false detections.")
-                    
-                    # Show table of recognized students with a checkbox to include/exclude
-                    if present_students:
-                        st.markdown("### Recognized Students")
-                        st.markdown("You can uncheck any students that were incorrectly recognized before saving attendance.")
-                        
-                        # Initialize a key for form state
-                        form_key = f"attendance_form_{int(time.time())}"
-                        
-                        with st.form(key=form_key):
-                            # Create checkboxes for each student
-                            selected_students = {}
-                            
-                            for i, student in enumerate(present_students):
-                                selected_students[student["id"]] = st.checkbox(
-                                    f"{student['roll_no']} - {student['name']}",
-                                    value=True,
-                                    key=f"student_{student['id']}"
-                                )
-                            
-                            # Save attendance button
-                            submit_attendance = st.form_submit_button("Save Attendance")
-                            
-                            if submit_attendance:
-                                # Get selected students
-                                marked_ids = [student_id for student_id, selected in selected_students.items() if selected]
-                                
-                                if marked_ids:
-                                    # Mark attendance in database
-                                    selected_date = attendance_date.strftime("%Y-%m-%d")
-                                    success_count = 0
-                                    
-                                    for student_id in marked_ids:
-                                        success = mark_attendance(student_id, subject_id, selected_date, selected_period)
-                                        if success:
-                                            success_count += 1
-                                    
-                                    if success_count > 0:
-                                        st.success(f"Attendance saved for {success_count} students on {selected_date}!")
-                                        
-                                        # Store attendance data in session state before clearing
-                                        st.session_state.last_attendance = {
-                                            'subject': selected_subject,
-                                            'date': selected_date,
-                                            'period': selected_period,
-                                            'count': success_count
-                                        }
-                                        
-                                        # Clear form by triggering rerun with parameter
-                                        st.session_state.clear_attendance_form = True
-                                        st.button("Take New Attendance", on_click=lambda: st.session_state.update({
-                                            'clear_attendance_form': False,
-                                            'page': 'Take Attendance'
-                                        }))
-                                    else:
-                                        st.error("Failed to save attendance. Please try again.")
-                                else:
-                                    st.warning("No students were selected for attendance.")
-                    
-                    # Visual representation of recognized students
-                    st.markdown("### Recognized Students")
-                    cols = st.columns(4)
-                    col_idx = 0
-                    
-                    for student in present_students:
-                        # Display student face image
-                        with cols[col_idx]:
+                # Display recognized students
+                st.markdown("### All Recognized Students")
+                
+                # Get full details of all recognized students
+                recognized_student_details = []
+                for student_id in all_recognized_students:
+                    student_details = get_student_details(student_id)
+                    if student_details:
+                        recognized_student_details.append(student_details)
+                
+                # Display in a grid
+                if recognized_student_details:
+                    grid_cols = st.columns(4)
+                    for i, student in enumerate(recognized_student_details):
+                        with grid_cols[i % 4]:
                             try:
                                 img = Image.open(student["image_path"])
                                 st.image(img, caption=f"{student['roll_no']}\n{student['name']}", width=150)
-                                
-                                # Add confidence score if available
-                                idx = present_students.index(student)
-                                if idx < len(confidence_scores):
-                                    st.caption(f"Confidence: {confidence_scores[idx]:.2f}")
                             except Exception as e:
                                 st.error(f"Error loading image: {str(e)}")
-                            
-                            # Move to next column
-                            col_idx = (col_idx + 1) % 4
                     
-                    # Clean up temporary file if created
-                    if temp_image_path and os.path.exists(temp_image_path):
-                        os.remove(temp_image_path)
-                
-            except Exception as e:
-                logger.error(f"Error processing attendance: {str(e)}\n{traceback.format_exc()}")
-                st.error(f"Error processing attendance: {str(e)}")
+                    # Allow marking attendance for all recognized students
+                    st.markdown("### Mark Attendance")
+                    st.markdown("Select students to mark as present:")
+                    
+                    with st.form(key=f"batch_attendance_form_{int(time.time())}"):
+                        selected_students = {}
+                        
+                        for student in recognized_student_details:
+                            selected_students[student["id"]] = st.checkbox(
+                                f"{student['roll_no']} - {student['name']}",
+                                value=True,
+                                key=f"batch_student_{student['id']}"
+                            )
+                        
+                        # Save attendance button
+                        submit_attendance = st.form_submit_button("Save Attendance")
+                        
+                        if submit_attendance:
+                            # Get selected students
+                            marked_ids = [student_id for student_id, selected in selected_students.items() if selected]
+                            
+                            if marked_ids:
+                                # Mark attendance in database
+                                selected_date = attendance_date.strftime("%Y-%m-%d")
+                                success_count = 0
+                                
+                                for student_id in marked_ids:
+                                    success = mark_attendance(student_id, subject_id, selected_date, selected_period)
+                                    if success:
+                                        success_count += 1
+                                
+                                if success_count > 0:
+                                    st.success(f"Attendance saved for {success_count} students on {selected_date}!")
+                                    
+                                    # Store attendance data in session state before clearing
+                                    st.session_state.last_attendance = {
+                                        'subject': selected_subject,
+                                        'date': selected_date,
+                                        'period': selected_period,
+                                        'count': success_count
+                                    }
+                                    
+                                    # Clear form by triggering rerun with parameter
+                                    st.session_state.clear_attendance_form = True
+                                    
+                                    # Generate a new unique form key for next time
+                                    st.session_state.form_key = f"batch_attendance_form_{int(time.time())}"
+                                    
+                                    # Clear uploaded files to reset the form
+                                    st.session_state.uploaded_files = None
+                                    
+                                    # Add button to take new attendance
+                                    st.button("Take New Attendance", on_click=lambda: st.session_state.update({
+                                        'clear_attendance_form': False,
+                                        'page': 'Take Attendance'
+                                    }))
+                                else:
+                                    st.error("Failed to save attendance. Please try again.")
+                            else:
+                                st.warning("No students were selected for attendance.")
+                else:
+                    st.warning("No students were recognized in any of the images.")
+        else:
+            # Process single image (existing code)
+            with st.spinner("Processing image using facial recognition..."):
+                try:
+                    # Record start time for performance metrics
+                    start_time = time.time()
+                    
+                    # Get all students enrolled in the selected subject
+                    all_students = get_all_students()
+                    
+                    # Check if we have students in database
+                    if not all_students:
+                        st.warning("No students found in database. Please register students first.")
+                    else:
+                        # Prepare parameters for DeepFace verification
+                        # Handle both uploaded file objects and file paths
+                        temp_image_path = None
+                        
+                        if is_uploaded_file(image_file):
+                            # For uploaded files, save to a temporary file
+                            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                            temp_image_path = f"temp_image_{timestamp}.jpg"
+                            with open(temp_image_path, "wb") as f:
+                                f.write(image_file.getvalue())
+                            classroom_image = temp_image_path
+                        else:
+                            # For paths from ESP32-CAM
+                            classroom_image = image_file
+                        
+                        # Detect all faces first to get count
+                        detected_faces, face_locations = detect_faces_with_details(classroom_image)
+                        
+                        # Use the selected model with adjusted threshold for better recognition
+                        present_students, confidence_scores = verify_faces(
+                            classroom_image_path=classroom_image, 
+                            students=all_students,
+                            threshold=threshold,
+                            model_name=model_name,
+                            return_confidence=True
+                        )
+                        
+                        # Calculate processing time
+                        end_time = time.time()
+                        processing_time = end_time - start_time
+                        
+                        # Save statistics to session state
+                        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0
+                        recognition_rate = (len(present_students) / len(detected_faces) * 100) if detected_faces else 0
+                        
+                        stats = {
+                            'datetime': current_time,
+                            'subject': selected_subject,
+                            'period': selected_period,
+                            'processing_time': processing_time,
+                            'detected_faces': len(detected_faces),
+                            'recognized_students': len(present_students),
+                            'recognition_rate': recognition_rate,
+                            'avg_confidence': avg_confidence
+                        }
+                        
+                        save_session_stats(stats)
+                        
+                        # Display statistics
+                        display_recognition_stats(
+                            processing_time=processing_time,
+                            detected_faces=len(detected_faces),
+                            recognized_students=present_students,
+                            confidence_scores=confidence_scores,
+                            model_name=model_name
+                        )
+                        
+                        # Display face detection visualization
+                        visualize_detected_faces(classroom_image, face_locations, present_students)
+                        
+                        # Display attendance summary
+                        st.subheader("Attendance Summary")
+                        
+                        # Show comparison of detected vs recognized faces
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.info(f"**Detected Faces:** {len(detected_faces)}")
+                            
+                        with col2:
+                            st.success(f"**Recognized Students:** {len(present_students)}")
+                        
+                        if len(detected_faces) > len(present_students):
+                            st.warning(f"⚠️ {len(detected_faces) - len(present_students)} faces detected but not recognized. These may be students not registered in the system or false detections.")
+                        
+                        # Show table of recognized students with a checkbox to include/exclude
+                        if present_students:
+                            st.markdown("### Recognized Students")
+                            st.markdown("You can uncheck any students that were incorrectly recognized before saving attendance.")
+                            
+                            # Initialize a key for form state
+                            form_key = f"attendance_form_{int(time.time())}"
+                            
+                            with st.form(key=form_key):
+                                # Create checkboxes for each student
+                                selected_students = {}
+                                
+                                for i, student in enumerate(present_students):
+                                    selected_students[student["id"]] = st.checkbox(
+                                        f"{student['roll_no']} - {student['name']}",
+                                        value=True,
+                                        key=f"student_{student['id']}"
+                                    )
+                                
+                                # Save attendance button
+                                submit_attendance = st.form_submit_button("Save Attendance")
+                                
+                                if submit_attendance:
+                                    # Get selected students
+                                    marked_ids = [student_id for student_id, selected in selected_students.items() if selected]
+                                    
+                                    if marked_ids:
+                                        # Mark attendance in database
+                                        selected_date = attendance_date.strftime("%Y-%m-%d")
+                                        success_count = 0
+                                        
+                                        for student_id in marked_ids:
+                                            success = mark_attendance(student_id, subject_id, selected_date, selected_period)
+                                            if success:
+                                                success_count += 1
+                                        
+                                        if success_count > 0:
+                                            st.success(f"Attendance saved for {success_count} students on {selected_date}!")
+                                            
+                                            # Store attendance data in session state before clearing
+                                            st.session_state.last_attendance = {
+                                                'subject': selected_subject,
+                                                'date': selected_date,
+                                                'period': selected_period,
+                                                'count': success_count
+                                            }
+                                            
+                                            # Clear form by triggering rerun with parameter
+                                            st.session_state.clear_attendance_form = True
+                                            
+                                            # Generate a new unique form key for next time
+                                            st.session_state.form_key = f"attendance_form_{int(time.time())}"
+                                            
+                                            # Clear uploaded files to reset the form
+                                            st.session_state.uploaded_files = None
+                                            
+                                            # Add button to take new attendance
+                                            st.button("Take New Attendance", on_click=lambda: st.session_state.update({
+                                                'clear_attendance_form': False,
+                                                'page': 'Take Attendance'
+                                            }))
+                                        else:
+                                            st.error("Failed to save attendance. Please try again.")
+                                    else:
+                                        st.warning("No students were selected for attendance.")
+                            
+                            # Visual representation of recognized students
+                            st.markdown("### Recognized Students")
+                            cols = st.columns(4)
+                            col_idx = 0
+                            
+                            for student in present_students:
+                                # Display student face image
+                                with cols[col_idx]:
+                                    try:
+                                        img = Image.open(student["image_path"])
+                                        st.image(img, caption=f"{student['roll_no']}\n{student['name']}", width=150)
+                                        
+                                        # Add confidence score if available
+                                        idx = present_students.index(student)
+                                        if idx < len(confidence_scores):
+                                            st.caption(f"Confidence: {confidence_scores[idx]:.2f}")
+                                    except Exception as e:
+                                        st.error(f"Error loading image: {str(e)}")
+                                    
+                                    # Move to next column
+                                    col_idx = (col_idx + 1) % 4
+                        
+                        # Clean up temporary file if created
+                        if temp_image_path and os.path.exists(temp_image_path):
+                            os.remove(temp_image_path)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing attendance: {str(e)}\n{traceback.format_exc()}")
+                    st.error(f"Error processing attendance: {str(e)}")
     elif not deepface_available and st.button("Analyze Image"):
         st.error("DeepFace module is not available. Please check installation and dependencies.")
 
@@ -1009,8 +1232,10 @@ elif page == "Recognition Stats":
             history_df = pd.DataFrame(stats['history'])
             
             # Display line charts
-            st.line_chart(history_df[['recognition_rate']])
-            st.line_chart(history_df[['processing_time']])
+            if 'recognition_rate' in history_df.columns:
+                st.line_chart(history_df[['recognition_rate']])
+            if 'processing_time' in history_df.columns:
+                st.line_chart(history_df[['processing_time']])
             
         # Display most recent recognition details
         if 'last_session' in stats:
@@ -1043,17 +1268,28 @@ elif page == "Recognition Stats":
             if 'confusion_matrix' in stats:
                 cm = stats['confusion_matrix']
                 
-                # Create a basic confusion matrix visualization
-                cm_data = np.array([[cm.get('TP', 0), cm.get('FP', 0)], 
-                                   [cm.get('FN', 0), cm.get('TN', 0)]])
-                
-                fig, ax = plt.subplots(figsize=(6, 5))
-                sns.heatmap(cm_data, annot=True, fmt='d', cmap='Blues',
-                           xticklabels=['Present', 'Absent'],
-                           yticklabels=['Present', 'Absent'])
-                plt.ylabel('Actual')
-                plt.xlabel('Predicted')
-                st.pyplot(fig)
+                try:
+                    # Create a basic confusion matrix visualization
+                    cm_data = np.array([[cm.get('TP', 0), cm.get('FP', 0)], 
+                                      [cm.get('FN', 0), cm.get('TN', 0)]])
+                    
+                    fig, ax = plt.subplots(figsize=(6, 5))
+                    sns.heatmap(cm_data, annot=True, fmt='d', cmap='Blues',
+                              xticklabels=['Present', 'Absent'],
+                              yticklabels=['Present', 'Absent'])
+                    plt.ylabel('Actual')
+                    plt.xlabel('Predicted')
+                    st.pyplot(fig)
+                except Exception as e:
+                    logger.error(f"Error creating confusion matrix visualization: {str(e)}")
+                    st.error("Could not create confusion matrix visualization. Make sure matplotlib and seaborn are installed.")
+                    
+                    # Fallback to text display
+                    st.write("Confusion Matrix Data:")
+                    st.write(f"True Positives: {cm.get('TP', 0)}")
+                    st.write(f"False Positives: {cm.get('FP', 0)}")
+                    st.write(f"False Negatives: {cm.get('FN', 0)}")
+                    st.write(f"True Negatives: {cm.get('TN', 0)}")
             else:
                 # Create placeholder matrix with sample data
                 tp = stats.get('total_students_recognized', 0)
@@ -1097,26 +1333,71 @@ elif page == "Recognition Stats":
             if 'history' in stats and len(stats['history']) > 0:
                 history_df = pd.DataFrame(stats['history'])
                 if 'datetime' in history_df and 'recognition_rate' in history_df:
-                    history_df['datetime'] = pd.to_datetime(history_df['datetime'])
-                    
-                    # Plot accuracy over time
-                    fig, ax = plt.subplots(figsize=(10, 5))
-                    ax.plot(history_df['datetime'], history_df['recognition_rate'], 'o-', linewidth=2)
-                    ax.set_xlabel('Date/Time')
-                    ax.set_ylabel('Recognition Rate (%)')
-                    ax.set_title('Face Recognition Accuracy Over Time')
-                    ax.grid(True)
-                    
-                    if len(history_df) > 5:
-                        plt.xticks(rotation=45)
-                    
-                    st.pyplot(fig)
+                    try:
+                        history_df['datetime'] = pd.to_datetime(history_df['datetime'])
+                        
+                        # Plot accuracy over time
+                        fig, ax = plt.subplots(figsize=(10, 5))
+                        ax.plot(history_df['datetime'], history_df['recognition_rate'], 'o-', linewidth=2)
+                        ax.set_xlabel('Date/Time')
+                        ax.set_ylabel('Recognition Rate (%)')
+                        ax.set_title('Face Recognition Accuracy Over Time')
+                        ax.grid(True)
+                        
+                        if len(history_df) > 5:
+                            plt.xticks(rotation=45)
+                        
+                        st.pyplot(fig)
+                    except Exception as e:
+                        logger.error(f"Error creating accuracy over time plot: {str(e)}")
+                        st.error("Could not create accuracy plot. Using simplified view instead.")
+                        
+                        # Fallback to simpler visualization
+                        st.write("Recognition Rate Over Time:")
+                        if 'datetime' in history_df.columns and 'recognition_rate' in history_df.columns:
+                            simple_df = history_df[['datetime', 'recognition_rate']].copy()
+                            simple_df['datetime'] = simple_df['datetime'].astype(str)
+                            simple_df = simple_df.set_index('datetime')
+                            st.line_chart(simple_df)
                 else:
                     st.info("Not enough historical data with timestamps to plot accuracy over time.")
             else:
                 st.info("No historical data available to show accuracy trends.")
     else:
         st.info("No recognition statistics available yet. Process attendance first to generate statistics.")
+        
+        # Show sample data to demonstrate the feature
+        st.subheader("Sample Statistics (Demo)")
+        
+        # Create sample metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Avg. Processing Time", "1.25 sec")
+        with col2:
+            st.metric("Recognition Rate", "85.0%")
+        with col3:
+            st.metric("Avg. Confidence", "0.78")
+        with col4:
+            st.metric("Total Sessions", "0")
+            
+        st.caption("This is a demonstration of how the statistics will appear after processing attendance.")
+        
+        # Add instructions
+        st.markdown("""
+        ### How to generate recognition statistics:
+        1. Go to the **Take Attendance** page
+        2. Upload a classroom image or capture from camera
+        3. Click **Analyze Image** to process the attendance
+        4. The statistics will be automatically saved and displayed here
+        """)
+        
+        # Add sample chart
+        st.subheader("Sample Recognition Rate Chart (Demo)")
+        sample_data = pd.DataFrame({
+            'date': pd.date_range(start='2023-01-01', periods=5),
+            'rate': [75, 82, 78, 88, 85]
+        }).set_index('date')
+        st.line_chart(sample_data)
 
 elif page == "Class Reports":
     st.title("🏫 Class-wise Attendance Reports")
@@ -1440,264 +1721,260 @@ elif page == "Student Reports":
                     
                     # Get student details
                     student_details = get_student_details(student_id)
+                    
                     if student_details is None:
                         st.error("Student details not found in database. The student may have been deleted.")
-                        student_details = None
+                    else:
+                        # Create tabs for different views
+                        tab1, tab2 = st.tabs(["Summary", "Detailed Report"])
+                        
+                        with tab1:
+                            # Display student information
+                            col1, col2 = st.columns([1, 3])
+                            
+                            with col1:
+                                try:
+                                    # Display student image
+                                    img = Image.open(student_details["image_path"])
+                                    st.image(img, width=150)
+                                except:
+                                    st.info("No image available")
+                            
+                            with col2:
+                                st.markdown(f"### {student_details['name']}")
+                                st.markdown(f"**Roll No:** {student_details['roll_no']}")
+                                st.markdown(f"**Email:** {student_details['email'] or 'N/A'}")
+                                st.markdown(f"**Department:** {student_details['department']} | **Year:** {student_details['year']} | **Division:** {student_details['division']}")
+                            
+                            # Get attendance summary
+                            attendance_summary = get_student_attendance_summary(student_id)
+                            
+                            if attendance_summary:
+                                # Convert to DataFrame
+                                df_summary = pd.DataFrame([
+                                    {
+                                        "Subject Code": row["subject_code"],
+                                        "Subject Name": row["subject_name"],
+                                        "Present": row["present_count"],
+                                        "Total Classes": row["total_classes"],
+                                        "Attendance %": round(row["present_count"] / row["total_classes"] * 100, 1) if row["total_classes"] > 0 else 0
+                                    }
+                                    for row in attendance_summary
+                                ])
+                                
+                                # Calculate overall attendance percentage
+                                overall_present = df_summary["Present"].sum()
+                                overall_total = df_summary["Total Classes"].sum()
+                                overall_percentage = round(overall_present / overall_total * 100, 1) if overall_total > 0 else 0
+                                
+                                # Show overall stats
+                                st.markdown("### Overall Attendance")
+                                
+                                # Determine status color based on attendance
+                                status_color = "#4caf50" if overall_percentage >= 75 else "#ff9800" if overall_percentage >= 50 else "#f44336"
+                                
+                                # Create attendance gauge chart
+                                fig = go.Figure(go.Indicator(
+                                    mode="gauge+number",
+                                    value=overall_percentage,
+                                    domain={'x': [0, 1], 'y': [0, 1]},
+                                    title={'text': "Overall Attendance"},
+                                    gauge={
+                                        'axis': {'range': [0, 100]},
+                                        'bar': {'color': status_color},
+                                        'steps': [
+                                            {'range': [0, 50], 'color': "#ffcdd2"},
+                                            {'range': [50, 75], 'color': "#ffecb3"},
+                                            {'range': [75, 100], 'color': "#c8e6c9"}
+                                        ],
+                                        'threshold': {
+                                            'line': {'color': "red", 'width': 4},
+                                            'thickness': 0.75,
+                                            'value': 75
+                                        }
+                                    }
+                                ))
+                                
+                                fig.update_layout(height=250)
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                                # Show subject-wise attendance
+                                st.markdown("### Subject-wise Attendance")
+                                
+                                # Create bar chart for subject-wise attendance
+                                fig = px.bar(
+                                    df_summary,
+                                    x="Subject Code",
+                                    y="Attendance %",
+                                    title="Subject-wise Attendance Percentage",
+                                    color="Attendance %",
+                                    color_continuous_scale=["red", "orange", "green"],
+                                    range_color=[0, 100],
+                                    text="Attendance %"
+                                )
+                                
+                                fig.update_layout(height=400)
+                                fig.add_hline(y=75, line_dash="dash", line_color="red", annotation_text="Attendance Threshold (75%)")
+                                
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                                # Display the detailed table
+                                st.markdown("### Subject Details")
+                                
+                                # Add color formatting based on attendance percentage
+                                def color_attendance(val):
+                                    if val < 50:
+                                        return 'color: #f44336; font-weight: bold'  # Red
+                                    elif val < 75:
+                                        return 'color: #ff9800; font-weight: bold'  # Orange
+                                    else:
+                                        return 'color: #4caf50; font-weight: bold'  # Green
+                                
+                                # Apply the formatting to the attendance percentage column
+                                styled_df = df_summary.style.applymap(
+                                    color_attendance, 
+                                    subset=pd.IndexSlice[:, ['Attendance %']]
+                                )
+                                
+                                st.dataframe(styled_df, use_container_width=True)
+                            else:
+                                st.info("No attendance data found for this student.")
+                        
+                        with tab2:
+                            # Get detailed attendance report
+                            attendance_report = get_student_attendance_report(student_id)
+                            
+                            if attendance_report:
+                                # Convert to DataFrame
+                                df_report = pd.DataFrame([
+                                    {
+                                        "Date": row["date"],
+                                        "Subject": f"{row['subject_code']} - {row['subject_name']}",
+                                        "Period": row["period"],
+                                        "Status": "✅" if row["status"] == "present" else "❌"
+                                    }
+                                    for row in attendance_report
+                                ])
+                                
+                                # Convert date column to datetime
+                                df_report["Date"] = pd.to_datetime(df_report["Date"])
+                                
+                                # Add day of week column
+                                df_report["Day"] = df_report["Date"].dt.day_name()
+                                
+                                # Group by date to create calendar view
+                                cal_data = df_report.groupby("Date")["Status"].agg(
+                                    lambda x: "✅" if all(s == "✅" for s in x) else 
+                                              "❌" if all(s == "❌" for s in x) else "⚠️"
+                                )
+                                
+                                st.markdown("### Attendance Calendar")
+                                
+                                # Create a monthly view
+                                months = sorted(df_report["Date"].dt.to_period("M").unique())
+                                
+                                for month_period in months:
+                                    month_start = month_period.start_time
+                                    month_name = month_start.strftime("%B %Y")
+                                    
+                                    st.markdown(f"#### {month_name}")
+                                    
+                                    # Filter data for this month
+                                    month_data = cal_data[cal_data.index.to_period("M") == month_period]
+                                    
+                                    # Create a calendar for this month
+                                    _, num_days = calendar.monthrange(month_start.year, month_start.month)
+                                    
+                                    # Create a 7x6 calendar layout (7 days per week, up to 6 weeks)
+                                    calendar_data = []
+                                    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                                    
+                                    # Create week rows
+                                    first_day_weekday = month_start.replace(day=1).weekday()  # 0 is Monday
+                                    day_count = 1
+                                    
+                                    for week in range(6):  # Max 6 weeks in a month
+                                        week_data = []
+                                        for weekday in range(7):  # 7 days in a week
+                                            if (week == 0 and weekday < first_day_weekday) or day_count > num_days:
+                                                # Empty cell
+                                                week_data.append("")
+                                            else:
+                                                date_str = f"{month_start.year}-{month_start.month:02d}-{day_count:02d}"
+                                                date = pd.Timestamp(date_str)
+                                                
+                                                if date in month_data.index:
+                                                    week_data.append(f"{day_count} {month_data[date]}")
+                                                else:
+                                                    week_data.append(f"{day_count}")
+                                                
+                                                day_count += 1
+                                        
+                                        calendar_data.append(week_data)
+                                    
+                                    # Only include weeks that have days
+                                    calendar_data = [week for week in calendar_data if any(cell != "" for cell in week)]
+                                    
+                                    # Create DataFrame for display
+                                    calendar_df = pd.DataFrame(calendar_data, columns=day_names)
+                                    
+                                    # Display as a styled table
+                                    def style_calendar(val):
+                                        if "✅" in val:
+                                            return 'background-color: #c8e6c9; font-weight: bold'
+                                        elif "❌" in val:
+                                            return 'background-color: #ffcdd2; font-weight: bold'
+                                        elif "⚠️" in val:
+                                            return 'background-color: #fff9c4; font-weight: bold'
+                                        else:
+                                            return ''
+                                    
+                                    # Apply the styling
+                                    styled_calendar = calendar_df.style.applymap(style_calendar)
+                                    st.dataframe(styled_calendar, use_container_width=True, hide_index=True)
+                                
+                                # Detailed attendance list
+                                st.markdown("### Detailed Attendance List")
+                                
+                                # Sort by date (newest first) and format date column
+                                df_report = df_report.sort_values("Date", ascending=False)
+                                df_report["Date"] = df_report["Date"].dt.strftime("%Y-%m-%d")
+                                
+                                # Display as a styled dataframe
+                                def style_status(val):
+                                    if val == "✅":
+                                        return 'color: #4caf50; font-weight: bold'
+                                    else:
+                                        return 'color: #f44336; font-weight: bold'
+                                
+                                # Apply the styling
+                                styled_df = df_report.style.applymap(
+                                    style_status, 
+                                    subset=pd.IndexSlice[:, ['Status']]
+                                )
+                                
+                                st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                                
+                                # Export to Excel
+                                excel_path = os.path.join("excel_exports", f"Student_Report_{selected_roll_no}.xlsx")
+                                df_report.to_excel(excel_path, index=False)
+                                
+                                with open(excel_path, "rb") as file:
+                                    st.download_button(
+                                        label="Download Excel Report",
+                                        data=file,
+                                        file_name=f"Attendance_Report_{selected_roll_no}.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                    )
+                            else:
+                                st.info("No detailed attendance records found for this student.")
+                                
                 except IndexError:
                     logger.error(f"Student with roll number {selected_roll_no} not found in DataFrame")
-                    st.error(f"Student with roll number {selected_roll_no} not found in the student database.")
-                    student_details = None
+                    st.error(f"Student with roll number {selected_roll_no} not found in the student database. This may happen if the student record was deleted after the page loaded.")
                 except Exception as e:
                     logger.error(f"Error retrieving student details: {str(e)}")
                     st.error(f"Failed to retrieve student details: {str(e)}")
-                    student_details = None
-                
-                if student_details:
-                    # Create tabs for different views
-                    tab1, tab2 = st.tabs(["Summary", "Detailed Report"])
-                    
-                    with tab1:
-                        # Display student information
-                        col1, col2 = st.columns([1, 3])
-                        
-                        with col1:
-                            try:
-                                # Display student image
-                                img = Image.open(student_details["image_path"])
-                                st.image(img, width=150)
-                            except:
-                                st.info("No image available")
-                        
-                        with col2:
-                            st.markdown(f"### {student_details['name']}")
-                            st.markdown(f"**Roll No:** {student_details['roll_no']}")
-                            st.markdown(f"**Email:** {student_details['email'] or 'N/A'}")
-                            st.markdown(f"**Department:** {student_details['department']} | **Year:** {student_details['year']} | **Division:** {student_details['division']}")
-                        
-                        # Get attendance summary
-                        attendance_summary = get_student_attendance_summary(student_id)
-                        
-                        if attendance_summary:
-                            # Convert to DataFrame
-                            df_summary = pd.DataFrame([
-                                {
-                                    "Subject Code": row["subject_code"],
-                                    "Subject Name": row["subject_name"],
-                                    "Present": row["present_count"],
-                                    "Total Classes": row["total_classes"],
-                                    "Attendance %": round(row["present_count"] / row["total_classes"] * 100, 1) if row["total_classes"] > 0 else 0
-                                }
-                                for row in attendance_summary
-                            ])
-                            
-                            # Calculate overall attendance percentage
-                            overall_present = df_summary["Present"].sum()
-                            overall_total = df_summary["Total Classes"].sum()
-                            overall_percentage = round(overall_present / overall_total * 100, 1) if overall_total > 0 else 0
-                            
-                            # Show overall stats
-                            st.markdown("### Overall Attendance")
-                            
-                            # Determine status color based on attendance
-                            status_color = "#4caf50" if overall_percentage >= 75 else "#ff9800" if overall_percentage >= 50 else "#f44336"
-                            
-                            # Create attendance gauge chart
-                            fig = go.Figure(go.Indicator(
-                                mode="gauge+number",
-                                value=overall_percentage,
-                                domain={'x': [0, 1], 'y': [0, 1]},
-                                title={'text': "Overall Attendance"},
-                                gauge={
-                                    'axis': {'range': [0, 100]},
-                                    'bar': {'color': status_color},
-                                    'steps': [
-                                        {'range': [0, 50], 'color': "#ffcdd2"},
-                                        {'range': [50, 75], 'color': "#ffecb3"},
-                                        {'range': [75, 100], 'color': "#c8e6c9"}
-                                    ],
-                                    'threshold': {
-                                        'line': {'color': "red", 'width': 4},
-                                        'thickness': 0.75,
-                                        'value': 75
-                                    }
-                                }
-                            ))
-                            
-                            fig.update_layout(height=250)
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Show subject-wise attendance
-                            st.markdown("### Subject-wise Attendance")
-                            
-                            # Create bar chart for subject-wise attendance
-                            fig = px.bar(
-                                df_summary,
-                                x="Subject Code",
-                                y="Attendance %",
-                                title="Subject-wise Attendance Percentage",
-                                color="Attendance %",
-                                color_continuous_scale=["red", "orange", "green"],
-                                range_color=[0, 100],
-                                text="Attendance %"
-                            )
-                            
-                            fig.update_layout(height=400)
-                            fig.add_hline(y=75, line_dash="dash", line_color="red", annotation_text="Attendance Threshold (75%)")
-                            
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Display the detailed table
-                            st.markdown("### Subject Details")
-                            
-                            # Add color formatting based on attendance percentage
-                            def color_attendance(val):
-                                if val < 50:
-                                    return 'color: #f44336; font-weight: bold'  # Red
-                                elif val < 75:
-                                    return 'color: #ff9800; font-weight: bold'  # Orange
-                                else:
-                                    return 'color: #4caf50; font-weight: bold'  # Green
-                            
-                            # Apply the formatting to the attendance percentage column
-                            styled_df = df_summary.style.applymap(
-                                color_attendance, 
-                                subset=pd.IndexSlice[:, ['Attendance %']]
-                            )
-                            
-                            st.dataframe(styled_df, use_container_width=True)
-                        else:
-                            st.info("No attendance data found for this student.")
-                    
-                    with tab2:
-                        # Get detailed attendance report
-                        attendance_report = get_student_attendance_report(student_id)
-                        
-                        if attendance_report:
-                            # Convert to DataFrame
-                            df_report = pd.DataFrame([
-                                {
-                                    "Date": row["date"],
-                                    "Subject": f"{row['subject_code']} - {row['subject_name']}",
-                                    "Period": row["period"],
-                                    "Status": "✅" if row["status"] == "present" else "❌"
-                                }
-                                for row in attendance_report
-                            ])
-                            
-                            # Convert date column to datetime
-                            df_report["Date"] = pd.to_datetime(df_report["Date"])
-                            
-                            # Add day of week column
-                            df_report["Day"] = df_report["Date"].dt.day_name()
-                            
-                            # Group by date to create calendar view
-                            cal_data = df_report.groupby("Date")["Status"].agg(
-                                lambda x: "✅" if all(s == "✅" for s in x) else 
-                                          "❌" if all(s == "❌" for s in x) else "⚠️"
-                            )
-                            
-                            st.markdown("### Attendance Calendar")
-                            
-                            # Create a monthly view
-                            months = sorted(df_report["Date"].dt.to_period("M").unique())
-                            
-                            for month_period in months:
-                                month_start = month_period.start_time
-                                month_name = month_start.strftime("%B %Y")
-                                
-                                st.markdown(f"#### {month_name}")
-                                
-                                # Filter data for this month
-                                month_data = cal_data[cal_data.index.to_period("M") == month_period]
-                                
-                                # Create a calendar for this month
-                                _, num_days = calendar.monthrange(month_start.year, month_start.month)
-                                
-                                # Create a 7x6 calendar layout (7 days per week, up to 6 weeks)
-                                calendar_data = []
-                                day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-                                
-                                # Create week rows
-                                first_day_weekday = month_start.replace(day=1).weekday()  # 0 is Monday
-                                day_count = 1
-                                
-                                for week in range(6):  # Max 6 weeks in a month
-                                    week_data = []
-                                    for weekday in range(7):  # 7 days in a week
-                                        if (week == 0 and weekday < first_day_weekday) or day_count > num_days:
-                                            # Empty cell
-                                            week_data.append("")
-                                        else:
-                                            date_str = f"{month_start.year}-{month_start.month:02d}-{day_count:02d}"
-                                            date = pd.Timestamp(date_str)
-                                            
-                                            if date in month_data.index:
-                                                week_data.append(f"{day_count} {month_data[date]}")
-                                            else:
-                                                week_data.append(f"{day_count}")
-                                            
-                                            day_count += 1
-                                    
-                                    calendar_data.append(week_data)
-                                
-                                # Only include weeks that have days
-                                calendar_data = [week for week in calendar_data if any(cell != "" for cell in week)]
-                                
-                                # Create DataFrame for display
-                                calendar_df = pd.DataFrame(calendar_data, columns=day_names)
-                                
-                                # Display as a styled table
-                                def style_calendar(val):
-                                    if "✅" in val:
-                                        return 'background-color: #c8e6c9; font-weight: bold'
-                                    elif "❌" in val:
-                                        return 'background-color: #ffcdd2; font-weight: bold'
-                                    elif "⚠️" in val:
-                                        return 'background-color: #fff9c4; font-weight: bold'
-                                    else:
-                                        return ''
-                                
-                                # Apply the styling
-                                styled_calendar = calendar_df.style.applymap(style_calendar)
-                                st.dataframe(styled_calendar, use_container_width=True, hide_index=True)
-                            
-                            # Detailed attendance list
-                            st.markdown("### Detailed Attendance List")
-                            
-                            # Sort by date (newest first) and format date column
-                            df_report = df_report.sort_values("Date", ascending=False)
-                            df_report["Date"] = df_report["Date"].dt.strftime("%Y-%m-%d")
-                            
-                            # Display as a styled dataframe
-                            def style_status(val):
-                                if val == "✅":
-                                    return 'color: #4caf50; font-weight: bold'
-                                else:
-                                    return 'color: #f44336; font-weight: bold'
-                            
-                            # Apply the styling
-                            styled_df = df_report.style.applymap(
-                                style_status, 
-                                subset=pd.IndexSlice[:, ['Status']]
-                            )
-                            
-                            st.dataframe(styled_df, use_container_width=True, hide_index=True)
-                            
-                            # Export to Excel
-                            excel_path = os.path.join("excel_exports", f"Student_Report_{selected_roll_no}.xlsx")
-                            df_report.to_excel(excel_path, index=False)
-                            
-                            with open(excel_path, "rb") as file:
-                                st.download_button(
-                                    label="Download Excel Report",
-                                    data=file,
-                                    file_name=f"Attendance_Report_{selected_roll_no}.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
-                        else:
-                            st.info("No detailed attendance records found for this student.")
-                else:
-                    st.error("Failed to retrieve student details.")
             else:
                 st.warning("No students match your search criteria.")
     
