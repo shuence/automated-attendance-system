@@ -11,7 +11,7 @@ from utils.db_utils import get_students_by_subject
 # Page configuration must be the first Streamlit command
 st.set_page_config(
     page_title="ENTC TY B Facial Attendance System",
-    page_icon="��",
+    page_icon="👨‍🎓",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -619,7 +619,7 @@ elif page == "Take Attendance":
     st.subheader("Classroom Image")
     image_source = st.radio(
         "Image Source",
-        ["Upload Image", "Capture from ESP32-CAM"],
+        ["Upload Image", "Capture from ESP32-CAM", "Use Webcam"],
         horizontal=True
     )
     
@@ -694,6 +694,25 @@ elif page == "Take Attendance":
                 except Exception as e:
                     logger.error(f"Error opening uploaded image: {str(e)}")
                     st.error("Failed to open uploaded image. Please try a different file.")
+    elif image_source == "Use Webcam":
+        st.info("Webcam capture will use your browser's camera. Please grant permission if prompted.")
+        
+        # Camera input for webcam capture
+        webcam_image = st.camera_input("Take a picture from webcam")
+        
+        if webcam_image is not None:
+            # Add webcam image to image_files list
+            image_files = [webcam_image]
+            image_file = webcam_image
+            process_all = False
+            
+            try:
+                # Display captured image
+                image = Image.open(webcam_image)
+                st.image(image, caption="Captured Image", width=400)
+            except Exception as e:
+                logger.error(f"Error opening webcam image: {str(e)}")
+                st.error("Failed to process webcam image.")
     else:
         esp32_url = st.text_input("ESP32-CAM URL", value="http://esp32-cam-ip/capture")
         if st.button("Capture Image"):
