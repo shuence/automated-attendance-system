@@ -168,9 +168,6 @@ if st.sidebar.button("📊 Attendance Reports", key="nav_reports", use_container
 if st.sidebar.button("🏫 Class-wise Reports", key="nav_class_reports", use_container_width=True):
     st.session_state.page = "Class Reports"
     
-if st.sidebar.button("👨‍🎓 Student-wise Reports", key="nav_student_reports", use_container_width=True):
-    st.session_state.page = "Student Reports"
-
 if st.sidebar.button("🔄 Edit Attendance", key="nav_edit_attendance", use_container_width=True):
     st.session_state.page = "Edit Attendance"
 
@@ -359,15 +356,21 @@ if page == "Teacher Dashboard":
             if st.button("Export Student List to Excel"):
                 # Create Excel file
                 excel_path = os.path.join("excel_exports", f"Students_{department}_{year}{division}.xlsx")
-                filtered_df.drop(columns=["ID"]).to_excel(excel_path, index=False)
-                
-                with open(excel_path, "rb") as file:
-                    st.download_button(
-                        label="Download Excel File",
-                        data=file,
-                        file_name=f"Students_{department}_{year}{division}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                try:
+                    # Using context manager to ensure the file is properly closed
+                    with pd.ExcelWriter(excel_path, mode='w') as writer:
+                        filtered_df.drop(columns=["ID"]).to_excel(writer, index=False)
+                    
+                    with open(excel_path, "rb") as file:
+                        st.download_button(
+                            label="Download Excel File",
+                            data=file,
+                            file_name=f"Students_{department}_{year}{division}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                except Exception as e:
+                    logger.error(f"Error exporting student list to Excel: {str(e)}")
+                    st.error(f"Failed to export student list: {str(e)}")
             
             # Student details and editing option
             st.markdown("### Student Details")
@@ -852,7 +855,9 @@ elif page == "Take Attendance":
                     st.markdown("### Mark Attendance")
                     st.markdown("Select students to mark as present:")
                     
-                    with st.form(key=f"batch_attendance_form_{int(time.time())}"):
+                    # Using container instead of form for more flexibility
+                    batch_container = st.container()
+                    with batch_container:
                         selected_students = {}
                         
                         for student in recognized_student_details:
@@ -861,53 +866,79 @@ elif page == "Take Attendance":
                                 value=True,
                                 key=f"batch_student_{student['id']}"
                             )
+                    
+                    # Mark attendance automatically button (outside the form)
+                    if st.button("Mark Attendance Automatically", key="auto_mark_batch", use_container_width=True, type="primary"):
+                        # Get selected students
+                        marked_ids = [student_id for student_id, selected in selected_students.items() if selected]
+                        print(f"AUTO DEBUG: marked_ids: {marked_ids}")
                         
-                        # Save attendance button
-                        submit_attendance = st.form_submit_button("Save Attendance")
-                        
-                        if submit_attendance:
-                            # Get selected students
-                            marked_ids = [student_id for student_id, selected in selected_students.items() if selected]
+                        if marked_ids:
+                            # Mark attendance in database
+                            selected_date = attendance_date.strftime("%Y-%m-%d")
+                            success_count = 0
                             
-                            if marked_ids:
-                                # Mark attendance in database
-                                selected_date = attendance_date.strftime("%Y-%m-%d")
-                                success_count = 0
+                            print(f"DEBUG: Trying to mark attendance for {len(marked_ids)} students")
+                            print(f"DEBUG: subject_id={subject_id}, date={selected_date}, period={selected_period}")
+                            
+                            for student_id in marked_ids:
+                                print(f"DEBUG: Marking attendance for student_id={student_id}")
+                                success = mark_attendance(student_id, subject_id, selected_date, selected_period)
+                                print(f"DEBUG: Attendance marking result: {success}")
+                                if success:
+                                    success_count += 1
+                            
+                            if success_count > 0:
+                                st.success(f"✅ Attendance saved for {success_count} students on {selected_date}!")
+                                print(f"DEBUG: Successfully saved attendance for {success_count} students")
                                 
-                                for student_id in marked_ids:
-                                    success = mark_attendance(student_id, subject_id, selected_date, selected_period)
-                                    if success:
-                                        success_count += 1
+                                # Store attendance data in session state before clearing
+                                st.session_state.last_attendance = {
+                                    'subject': selected_subject,
+                                    'date': selected_date,
+                                    'period': selected_period,
+                                    'count': success_count
+                                }
                                 
-                                if success_count > 0:
-                                    st.success(f"Attendance saved for {success_count} students on {selected_date}!")
-                                    
-                                    # Store attendance data in session state before clearing
-                                    st.session_state.last_attendance = {
-                                        'subject': selected_subject,
-                                        'date': selected_date,
-                                        'period': selected_period,
-                                        'count': success_count
-                                    }
-                                    
-                                    # Clear form by triggering rerun with parameter
-                                    st.session_state.clear_attendance_form = True
-                                    
-                                    # Generate a new unique form key for next time
-                                    st.session_state.form_key = f"batch_attendance_form_{int(time.time())}"
-                                    
-                                    # Clear uploaded files to reset the form
-                                    st.session_state.uploaded_files = None
-                                    
-                                    # Add button to take new attendance
-                                    st.button("Take New Attendance", on_click=lambda: st.session_state.update({
-                                        'clear_attendance_form': False,
-                                        'page': 'Take Attendance'
-                                    }))
-                                else:
-                                    st.error("Failed to save attendance. Please try again.")
+                                # Clear form by triggering rerun with parameter
+                                st.session_state.clear_attendance_form = True
+                                
+                                # Add button to take new attendance
+                                st.button("Take New Attendance", on_click=lambda: st.session_state.update({
+                                    'clear_attendance_form': False,
+                                    'page': 'Take Attendance'
+                                }))
                             else:
-                                st.warning("No students were selected for attendance.")
+                                st.error("Failed to save attendance. Please try again.")
+                        else:
+                            st.warning("No students were selected for attendance.")
+                    
+                    # Visual representation of recognized students
+                    st.markdown("### Student Photos")
+                    cols = st.columns(4)
+                    col_idx = 0
+                    
+                    for student in present_students:
+                        # Display student face image
+                        with cols[col_idx]:
+                            try:
+                                img = Image.open(student["image_path"])
+                                st.image(img, caption=f"{student['roll_no']}\n{student['name']}", width=150)
+                                
+                                # Add confidence score if available
+                                idx = present_students.index(student)
+                                if idx < len(confidence_scores):
+                                    st.caption(f"Confidence: {confidence_scores[idx]:.2f}")
+                            except Exception as e:
+                                st.error(f"Error loading image: {str(e)}")
+                            
+                            # Move to next column
+                            col_idx = (col_idx + 1) % 4
+                    
+                    # Clean up temporary file if created
+                    if temp_image_path and os.path.exists(temp_image_path):
+                        os.remove(temp_image_path)
+                    
                 else:
                     st.warning("No students were recognized in any of the images.")
         else:
@@ -1000,74 +1031,55 @@ elif page == "Take Attendance":
                         if len(detected_faces) > len(present_students):
                             st.warning(f"⚠️ {len(detected_faces) - len(present_students)} faces detected but not recognized. These may be students not registered in the system or false detections.")
                         
-                        # Show table of recognized students with a checkbox to include/exclude
+                        # Show table of recognized students and mark attendance automatically
                         if present_students:
                             st.markdown("### Recognized Students")
-                            st.markdown("You can uncheck any students that were incorrectly recognized before saving attendance.")
                             
-                            # Initialize a key for form state
-                            form_key = f"attendance_form_{int(time.time())}"
+                            # Mark attendance automatically
+                            selected_date = attendance_date.strftime("%Y-%m-%d")
+                            success_count = 0
                             
-                            with st.form(key=form_key):
-                                # Create checkboxes for each student
-                                selected_students = {}
+                            # Get student IDs for marking attendance
+                            student_ids = [student["id"] for student in present_students]
+                            
+                            print(f"DEBUG: Automatically marking attendance for {len(student_ids)} students")
+                            print(f"DEBUG: subject_id={subject_id}, date={selected_date}, period={selected_period}")
+                            
+                            for student_id in student_ids:
+                                print(f"DEBUG: Marking attendance for student_id={student_id}")
+                                success = mark_attendance(student_id, subject_id, selected_date, selected_period)
+                                print(f"DEBUG: Attendance marking result: {success}")
+                                if success:
+                                    success_count += 1
+                            
+                            if success_count > 0:
+                                st.success(f"✅ Attendance automatically saved for {success_count} students on {selected_date}!")
+                                print(f"DEBUG: Successfully saved attendance for {success_count} students")
                                 
-                                for i, student in enumerate(present_students):
-                                    selected_students[student["id"]] = st.checkbox(
-                                        f"{student['roll_no']} - {student['name']}",
-                                        value=True,
-                                        key=f"student_{student['id']}"
-                                    )
-                                
-                                # Save attendance button
-                                submit_attendance = st.form_submit_button("Save Attendance")
-                                
-                                if submit_attendance:
-                                    # Get selected students
-                                    marked_ids = [student_id for student_id, selected in selected_students.items() if selected]
-                                    
-                                    if marked_ids:
-                                        # Mark attendance in database
-                                        selected_date = attendance_date.strftime("%Y-%m-%d")
-                                        success_count = 0
-                                        
-                                        for student_id in marked_ids:
-                                            success = mark_attendance(student_id, subject_id, selected_date, selected_period)
-                                            if success:
-                                                success_count += 1
-                                        
-                                        if success_count > 0:
-                                            st.success(f"Attendance saved for {success_count} students on {selected_date}!")
-                                            
-                                            # Store attendance data in session state before clearing
-                                            st.session_state.last_attendance = {
-                                                'subject': selected_subject,
-                                                'date': selected_date,
-                                                'period': selected_period,
-                                                'count': success_count
-                                            }
-                                            
-                                            # Clear form by triggering rerun with parameter
-                                            st.session_state.clear_attendance_form = True
-                                            
-                                            # Generate a new unique form key for next time
-                                            st.session_state.form_key = f"attendance_form_{int(time.time())}"
-                                            
-                                            # Clear uploaded files to reset the form
-                                            st.session_state.uploaded_files = None
-                                            
-                                            # Add button to take new attendance
-                                            st.button("Take New Attendance", on_click=lambda: st.session_state.update({
-                                                'clear_attendance_form': False,
-                                                'page': 'Take Attendance'
-                                            }))
-                                        else:
-                                            st.error("Failed to save attendance. Please try again.")
-                                    else:
-                                        st.warning("No students were selected for attendance.")
+                                # Store attendance data in session state
+                                st.session_state.last_attendance = {
+                                    'subject': selected_subject,
+                                    'date': selected_date,
+                                    'period': selected_period,
+                                    'count': success_count
+                                }
+                            else:
+                                st.error("Failed to save attendance automatically. Please check the logs.")
+                            
+                            # Display students in a table
+                            student_data = []
+                            for student in present_students:
+                                student_data.append({
+                                    "Roll No": student["roll_no"],
+                                    "Name": student["name"],
+                                    "Status": "✅ Present"
+                                })
+                            
+                            student_df = pd.DataFrame(student_data)
+                            st.dataframe(student_df, use_container_width=True)
                             
                             # Visual representation of recognized students
-                            st.markdown("### Recognized Students")
+                            st.markdown("### Student Photos")
                             cols = st.columns(4)
                             col_idx = 0
                             
@@ -1087,11 +1099,13 @@ elif page == "Take Attendance":
                                     
                                     # Move to next column
                                     col_idx = (col_idx + 1) % 4
+                            
+                            # Clean up temporary file if created
+                            if temp_image_path and os.path.exists(temp_image_path):
+                                os.remove(temp_image_path)
                         
-                        # Clean up temporary file if created
-                        if temp_image_path and os.path.exists(temp_image_path):
-                            os.remove(temp_image_path)
-                    
+                        else:
+                            st.warning("No students were recognized in any of the images.")
                 except Exception as e:
                     logger.error(f"Error processing attendance: {str(e)}\n{traceback.format_exc()}")
                     st.error(f"Error processing attendance: {str(e)}")
@@ -1174,25 +1188,46 @@ elif page == "Attendance Reports":
                             if os.path.exists(excel_path):
                                 # Read existing Excel and merge with new data
                                 try:
-                                    existing_df = pd.read_excel(excel_path)
-                                    
-                                    # Merge the dataframes
-                                    merged_df = pd.merge(existing_df, pivot_df, on=["Roll No", "Name", "Email"], how="outer")
-                                    merged_df.to_excel(excel_path, index=False)
-                                except Exception as excel_read_error:
-                                    logger.error(f"Error reading existing Excel: {str(excel_read_error)}")
-                                    # If existing file has issues, just write the new one
-                                    pivot_df.to_excel(excel_path, index=False)
+                                    # Use pandas with proper file closing
+                                    existing_df = None
+                                    try:
+                                        existing_df = pd.read_excel(excel_path)
+                                        
+                                        # Merge the dataframes
+                                        merged_df = pd.merge(existing_df, pivot_df, on=["Roll No", "Name", "Email"], how="outer")
+                                        # Save with context manager to ensure file is closed
+                                        with pd.ExcelWriter(excel_path, mode='w') as writer:
+                                            merged_df.to_excel(writer, index=False)
+                                    except Exception as excel_read_error:
+                                        logger.error(f"Error reading existing Excel: {str(excel_read_error)}")
+                                        # If existing file has issues, just write the new one
+                                        with pd.ExcelWriter(excel_path, mode='w') as writer:
+                                            pivot_df.to_excel(writer, index=False)
+                                except Exception as excel_write_error:
+                                    logger.error(f"Error writing Excel file: {str(excel_write_error)}")
+                                    # Try one more time with a different approach
+                                    try:
+                                        # Use a new filename if the original is locked
+                                        alt_excel_path = excel_path.replace(".xlsx", f"_{int(time.time())}.xlsx")
+                                        pivot_df.to_excel(alt_excel_path, index=False)
+                                        excel_path = alt_excel_path
+                                    except Exception as e:
+                                        logger.error(f"All Excel write attempts failed: {str(e)}")
+                                        raise
                             else:
-                                pivot_df.to_excel(excel_path, index=False)
+                                # Create new Excel file with context manager
+                                with pd.ExcelWriter(excel_path, mode='w') as writer:
+                                    pivot_df.to_excel(writer, index=False)
                             
-                            with open(excel_path, "rb") as file:
-                                st.download_button(
-                                    label="Download Excel Report",
-                                    data=file,
-                                    file_name=f"{selected_subject}_{report_date}.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
+                            # Only try to open the file for download if it exists
+                            if os.path.exists(excel_path):
+                                with open(excel_path, "rb") as file:
+                                    st.download_button(
+                                        label="Download Excel Report",
+                                        data=file,
+                                        file_name=f"{selected_subject}_{report_date}.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                    )
                         except Exception as excel_error:
                             logger.error(f"Error exporting to Excel: {str(excel_error)}")
                             st.error(f"Error exporting to Excel: {str(excel_error)}")
@@ -1638,6 +1673,7 @@ elif page == "Class Reports":
                                         # First, check if the file exists and try to read it
                                         if os.path.exists(excel_path):
                                             try:
+                                                print(f"DEBUG: Reading existing Excel file: {excel_path}")
                                                 existing_df = pd.read_excel(excel_path)
                                                 
                                                 # Get existing dates in the Excel file
@@ -1663,6 +1699,7 @@ elif page == "Class Reports":
                                                 # Save updated Excel file
                                                 existing_df.to_excel(excel_path, index=False)
                                                 st.success(f"Automatically updated {subject_name} Excel file with new attendance data.")
+                                                print(f"DEBUG: Excel write successful")
                                             except Exception as e:
                                                 # If reading fails, just write a new file
                                                 logger.error(f"Error reading existing Excel file: {str(e)}")
@@ -1691,7 +1728,14 @@ elif page == "Class Reports":
                 
                 # Export overall class report to Excel
                 excel_path = os.path.join("excel_exports", f"Class_Report_{department}_{year}{division}_{date_from}_to_{date_to}.xlsx")
-                df_summary.to_excel(excel_path, index=False)
+                try:
+                    # Using context manager to ensure the file is properly closed
+                    with pd.ExcelWriter(excel_path, mode='w') as writer:
+                        df_summary.to_excel(writer, index=False)
+                    st.success(f"Class report saved to {excel_path}")
+                except Exception as e:
+                    logger.error(f"Error exporting class report to Excel: {str(e)}")
+                    st.error(f"Failed to export class report: {str(e)}")
             else:
                 st.info(f"No attendance data found for the selected date range ({date_from} to {date_to}).")
     
@@ -1976,15 +2020,21 @@ elif page == "Student Reports":
                                 
                                 # Export to Excel
                                 excel_path = os.path.join("excel_exports", f"Student_Report_{selected_roll_no}.xlsx")
-                                df_report.to_excel(excel_path, index=False)
-                                
-                                with open(excel_path, "rb") as file:
-                                    st.download_button(
-                                        label="Download Excel Report",
-                                        data=file,
-                                        file_name=f"Attendance_Report_{selected_roll_no}.xlsx",
-                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                    )
+                                try:
+                                    # Using context manager to ensure the file is properly closed
+                                    with pd.ExcelWriter(excel_path, mode='w') as writer:
+                                        df_report.to_excel(writer, index=False)
+                                    
+                                    with open(excel_path, "rb") as file:
+                                        st.download_button(
+                                            label="Download Excel Report",
+                                            data=file,
+                                            file_name=f"Attendance_Report_{selected_roll_no}.xlsx",
+                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                        )
+                                except Exception as e:
+                                    logger.error(f"Error exporting student report to Excel: {str(e)}")
+                                    st.error(f"Failed to export report: {str(e)}")
                             else:
                                 st.info("No detailed attendance records found for this student.")
                                 

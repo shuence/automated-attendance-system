@@ -1,15 +1,23 @@
 import os
 import sqlite3
 import datetime
+import logging  # Add logging import
+
+# Configure logger
+logger = logging.getLogger(__name__)
 
 # Database configuration
 DB_PATH = os.path.join("db", "attendance.db")
 
 def get_connection():
     """Get a connection to the SQLite database"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row  # Enable row factory for column name access
-    return conn
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row  # Enable row factory for column name access
+        return conn
+    except Exception as e:
+        logger.error(f"Database connection error: {str(e)}")
+        raise
 
 def init_db():
     """Initialize the database with required tables if they don't exist"""
@@ -193,19 +201,40 @@ def get_subjects():
 
 def mark_attendance(student_id, subject_id, date, period, status="present"):
     """Mark attendance for a student"""
+    print(f"MARK_ATTENDANCE CALLED: student_id={student_id}, subject_id={subject_id}, date={date}, period={period}")
     conn = get_connection()
     cursor = conn.cursor()
     
     try:
+        # Log detailed information for debugging
+        logger.info(f"Marking attendance: student_id={student_id}, subject_id={subject_id}, date={date}, period={period}, status={status}")
+        
         cursor.execute('''
         INSERT OR REPLACE INTO attendance (student_id, subject_id, date, period, status)
         VALUES (?, ?, ?, ?, ?)
         ''', (student_id, subject_id, date, period, status))
         
         conn.commit()
-        return True
+        
+        # Verify the insertion was successful by querying the record
+        cursor.execute('''
+        SELECT id FROM attendance 
+        WHERE student_id = ? AND subject_id = ? AND date = ? AND period = ?
+        ''', (student_id, subject_id, date, period))
+        
+        result = cursor.fetchone()
+        if result:
+            print(f"Successfully marked attendance with ID: {result[0]}")
+            logger.info(f"Successfully marked attendance with ID: {result[0]}")
+            return True
+        else:
+            print("Attendance was not saved despite successful execution")
+            logger.error("Attendance was not saved despite successful execution")
+            return False
+            
     except Exception as e:
         print(f"Error marking attendance: {str(e)}")
+        logger.error(f"Error marking attendance: {str(e)}")
         conn.rollback()
         return False
     finally:
